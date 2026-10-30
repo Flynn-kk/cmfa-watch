@@ -1,0 +1,99 @@
+name: Watch ClashMetaForAndroid
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: cmfa-watch
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compare with upstream
+        id: cmp
+        run: |
+          set -euo pipefail
+          curl -fsSL -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/MetaCubeX/ClashMetaForAndroid/releases/latest" \
+            -o /tmp/up.json
+          UP_TAG=$(jq -r '.tag_name' /tmp/up.json)
+          LAST_TAG=$(jq -r '.last_tag // ""' state.json 2>/dev/null || echo "")
+          LAST_CHECK=$(jq -r '.checked_at // ""' state.json 2>/dev/null || echo "")
+          echo "upstream=${UP_TAG} last=${LAST_TAG} last_check=${LAST_CHECK}"
+          echo "$UP_TAG" > /tmp/up_tag
+
+          if [ -n "$LAST_TAG" ] && [ "$UP_TAG" = "$LAST_TAG" ]; then
+            echo "is_new=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_new=true" >> "$GITHUB_OUTPUT"
+          fi
+
+          # GitHub 会在仓库 60 天无活动后停用定时任务，用低频心跳提交保活
+          STALE=false
+          if [ -n "$LAST_CHECK" ]; then
+            AGE=$(( ( $(date -u +%s) - $(date -u -d "$LAST_CHECK" +%s) ) / 86400 ))
+            echo "state age (days): ${AGE}"
+            if [ "$AGE" -ge 20 ]; then STALE=true; fi
+          else
+            STALE=true
+          fi
+          echo "stale=${STALE}" >> "$GITHUB_OUTPUT"
+
+      - name: Open issue on new release
+        if: steps.cmp.outputs.is_new == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG=$(cat /tmp/up_tag)
+          EXIST=$(gh issue list --repo "$GITHUB_REPOSITORY" --state all \
+                    --search "in:title \"CMFA ${TAG}\"" --json number --jq 'length')
+          if [ "$EXIST" -gt 0 ]; then
+            echo "an issue for ${TAG} already exists, skipping"
+            exit 0
+          fi
+          NAME=$(jq -r '.name' /tmp/up.json)
+          URL=$(jq -r '.html_url' /tmp/up.json)
+          PUB=$(jq -r '.published_at' /tmp/up.json)
+          {
+            echo "**${NAME}** 发布了新版本。"
+            echo ""
+            echo "| 项 | 值 |"
+            echo "| --- | --- |"
+            echo "| 版本 | \`${TAG}\` |"
+            echo "| 发布时间 | ${PUB} |"
+            echo "| 发布页 | ${URL} |"
+            echo ""
+            echo "### APK 直链"
+            echo ""
+            jq -r '.assets[] | select(.name | endswith(".apk")) | "- [" + .name + "](" + .browser_download_url + ")"' /tmp/up.json
+            echo ""
+            echo "> 家里 Wi-Fi 下优先走 NAS 局域网镜像，比 GitHub 直连快很多。"
+          } > /tmp/body.md
+          gh issue create --repo "$GITHUB_REPOSITORY" \
+            --title "🆕 CMFA ${TAG} 已发布" \
+            --body-file /tmp/body.md \
+            --assignee Flynn-kk
+
+      - name: Persist state
+        if: steps.cmp.outputs.is_new == 'true' || steps.cmp.outputs.stale == 'true'
+        run: |
+          set -euo pipefail
+          TAG=$(cat /tmp/up_tag)
+          jq -n --arg t "$TAG" --arg d "$(date -u +%FT%TZ)" \
+             '{last_tag:$t, checked_at:$d}' > state.json
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add state.json
+          git commit -m "chore: state ${TAG}" || exit 0
+          git push
