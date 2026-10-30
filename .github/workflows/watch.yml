@@ -74,11 +74,15 @@ jobs:
             echo "| 发布时间 | ${PUB} |"
             echo "| 发布页 | ${URL} |"
             echo ""
-            echo "### APK 直链"
+            echo "### 在家：NAS 局域网镜像（最快）"
+            echo ""
+            echo "http://192.168.31.11:8083/"
+            echo ""
+            echo "NAS 每 15 分钟自动同步一次，镜像里通常已有这个版本。"
+            echo ""
+            echo "### 在外：GitHub 直链"
             echo ""
             jq -r '.assets[] | select(.name | endswith(".apk")) | "- [" + .name + "](" + .browser_download_url + ")"' /tmp/up.json
-            echo ""
-            echo "> 家里 Wi-Fi 下优先走 NAS 局域网镜像，比 GitHub 直连快很多。"
           } > /tmp/body.md
           gh issue create --repo "$GITHUB_REPOSITORY" \
             --title "🆕 CMFA ${TAG} 已发布" \
